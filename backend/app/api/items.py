@@ -22,7 +22,14 @@ from ..core.attachments import (
 from ..core.matcher import candidates_from_search_page, forget_alias, record_alias
 from ..core.metadata.tmdb import TMDBError, client_from_settings, image_url
 from ..core.naming import DEFAULT_NAMING, build_target, normalize_target_name
+from ..core.organize_targets import (
+    get_target,
+    relocate_item,
+    validate_target_directory,
+    work_key,
+)
 from ..core.parser import VIDEO_EXTS, file_ext
+from ..core.presence_cache import invalidate_library
 from ..core.providers import SourceError, build_source, norm
 from ..core.runner import runner
 from .deps import require_auth
@@ -81,6 +88,11 @@ class AttachmentLinkBody(BaseModel):
     target_video_path: str | None = None
 
 
+class ItemLocationBody(BaseModel):
+    path: str = ""
+    move_existing: bool = True
+
+
 def decorate(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         **candidate,
@@ -118,6 +130,9 @@ def item_payload(row: dict[str, Any]) -> dict[str, Any]:
         except (KeyError, TypeError, ValueError):
             planned_name = row["file_name"]
     override = row["target_name_override"] if "target_name_override" in row.keys() else None
+    dir_override = row["target_dir_override"] if "target_dir_override" in row.keys() else None
+    key = row["match_key"] or work_key(match)
+    organize_target = get_target(row["library_id"], key) if key else None
     return {
         "id": row["id"],
         "library_id": row["library_id"],
@@ -134,7 +149,9 @@ def item_payload(row: dict[str, Any]) -> dict[str, Any]:
         "manual": bool(row["manual"]),
         "target_path": row["target_path"],
         "target_name_override": override or "",
+        "target_dir_override": dir_override or "",
         "planned_name": planned_name,
+        "organize_target": organize_target,
         "updated_at": row["updated_at"],
     }
 
@@ -329,6 +346,79 @@ def patch_item(item_id: int, body: PatchBody):
         ),
     )
     return item_payload(load_item(item_id))
+
+
+def _ensure_item_library_idle(library_id: int) -> None:
+    active = query_one(
+        "SELECT id FROM tasks WHERE library_id=? AND status IN ('queued','running')",
+        (library_id,),
+    )
+    running = query_one(
+        "SELECT r.id FROM subscription_runs r "
+        "JOIN subscriptions s ON s.id=r.subscription_id "
+        "WHERE s.library_id=? AND r.status IN ('queued','running') LIMIT 1",
+        (library_id,),
+    )
+    if active or running:
+        raise HTTPException(
+            status_code=409,
+            detail="该影视库有任务正在运行，请稍后再调整存放位置",
+        )
+
+
+@router.put("/{item_id}/location")
+def save_item_location(item_id: int, body: ItemLocationBody):
+    """只调整当前文件的存放位置；已整理文件可直接移动过去。"""
+    row = load_item(item_id)
+    library = query_one("SELECT * FROM libraries WHERE id=?", (row["library_id"],))
+    if not library:
+        raise HTTPException(status_code=400, detail="影视库不存在")
+    _ensure_item_library_idle(library["id"])
+    source_row = query_one("SELECT * FROM sources WHERE id=?", (library["source_id"],))
+    if not source_row:
+        raise HTTPException(status_code=400, detail="影视库的文件源不存在")
+    source = build_source(source_row)
+    try:
+        path = validate_target_directory(
+            source,
+            library["target_root"] or "",
+            body.path,
+            "show",
+        )
+    except (ValueError, SourceError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    execute(
+        "UPDATE items SET target_dir_override=?, updated_at=? WHERE id=?",
+        (path, now(), item_id),
+    )
+    move: dict[str, Any] | None = None
+    move_error = ""
+    if row["status"] == "organized" and body.move_existing and row["target_path"]:
+        try:
+            move = relocate_item(library, source, row, path)
+        except (SourceError, OSError, ValueError) as exc:
+            move_error = str(exc)
+    invalidate_library(library["id"])
+    return {
+        "path": path,
+        "move": move,
+        "move_error": move_error,
+        "item": item_payload(load_item(item_id)),
+    }
+
+
+@router.delete("/{item_id}/location")
+def restore_item_location(item_id: int):
+    row = load_item(item_id)
+    _ensure_item_library_idle(row["library_id"])
+    restored = bool(row.get("target_dir_override"))
+    execute(
+        "UPDATE items SET target_dir_override=NULL, updated_at=? WHERE id=?",
+        (now(), item_id),
+    )
+    invalidate_library(row["library_id"])
+    return {"restored": restored}
 
 
 @router.post("/search")

@@ -11,10 +11,19 @@ from ..core.classify import needs_details
 from ..core.file_presence import filter_existing_rows
 from ..core.presence_cache import invalidate_library
 from ..core.naming import DEFAULT_NAMING, DEFAULT_SCRAPE, build_target
+from ..core.organize_targets import (
+    delete_target,
+    get_target,
+    load_targets,
+    relocate_organized_items,
+    save_target,
+    validate_target_directory,
+    work_key,
+)
 from ..core.organizer import Organizer
 from ..core.parser import file_ext
 from ..core.providers import build_source
-from ..core.providers.base import norm
+from ..core.providers.base import SourceError, norm
 from ..core.renamer import build_rename_plan
 from ..core.metadata.tmdb import TMDBError, client_from_settings, image_url
 from .deps import require_auth
@@ -40,6 +49,14 @@ class OrganizeBody(BaseModel):
 
 class PlanBody(BaseModel):
     item_ids: list[int]
+
+
+class WorkTargetBody(BaseModel):
+    item_id: int | None = None
+    match_key: str = ""
+    path: str = ""
+    mode: str = "category"
+    move_existing: bool = False
 
 
 class RenameBody(BaseModel):
@@ -88,6 +105,7 @@ def serialize_item(row: dict[str, Any], library: dict[str, Any] | None = None) -
             except (KeyError, TypeError, ValueError):
                 auto_name = row["file_name"]
     override = row["target_name_override"] if "target_name_override" in row.keys() else ""
+    dir_override = row["target_dir_override"] if "target_dir_override" in row.keys() else ""
     return {
         "id": row["id"],
         "library_id": row["library_id"],
@@ -101,6 +119,7 @@ def serialize_item(row: dict[str, Any], library: dict[str, Any] | None = None) -
         "manual": bool(row["manual"]),
         "target_path": row["target_path"],
         "target_name_override": override or "",
+        "target_dir_override": dir_override or "",
         "planned_name": override or auto_name,
         "auto_name": auto_name,
         "updated_at": row["updated_at"],
@@ -681,6 +700,106 @@ def library_works(library_id: int, q: str = "", refresh: bool = False):
     }
 
 
+def _resolve_work_key(library_id: int, item_id: int | None, match_key: str) -> str:
+    if item_id:
+        row = query_one(
+            "SELECT * FROM items WHERE library_id=? AND id=?",
+            (library_id, item_id),
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="文件不存在")
+        key = row["match_key"] or work_key(loads(row["match"], {}) or {})
+    else:
+        key = (match_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="该文件还没有匹配到作品")
+    return key
+
+
+def _ensure_work_idle(library_id: int) -> None:
+    active = query_one(
+        "SELECT id FROM tasks WHERE library_id=? AND status IN ('queued','running')",
+        (library_id,),
+    )
+    if active or _active_subscription(library_id):
+        raise HTTPException(
+            status_code=409,
+            detail="该影视库有任务正在运行，请稍后再调整整理位置",
+        )
+
+
+@router.get("/{library_id}/work-target")
+def get_work_target(
+    library_id: int,
+    item_id: int | None = None,
+    match_key: str = "",
+):
+    library = query_one("SELECT * FROM libraries WHERE id=?", (library_id,))
+    if not library:
+        raise HTTPException(status_code=404, detail="影视库不存在")
+    key = _resolve_work_key(library_id, item_id, match_key)
+    return {
+        "match_key": key,
+        "target_root": library["target_root"] or "",
+        "target": get_target(library_id, key),
+    }
+
+
+@router.put("/{library_id}/work-target")
+def save_work_target(library_id: int, body: WorkTargetBody):
+    library = query_one("SELECT * FROM libraries WHERE id=?", (library_id,))
+    if not library:
+        raise HTTPException(status_code=404, detail="影视库不存在")
+    _ensure_work_idle(library_id)
+    key = _resolve_work_key(library_id, body.item_id, body.match_key)
+    source_row = query_one("SELECT * FROM sources WHERE id=?", (library["source_id"],))
+    if not source_row:
+        raise HTTPException(status_code=400, detail="影视库的文件源不存在")
+    source = build_source(source_row)
+    try:
+        path = validate_target_directory(
+            source,
+            library["target_root"] or "",
+            body.path,
+            body.mode,
+        )
+        target = save_target(library_id, key, path, body.mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SourceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    move: dict[str, Any] | None = None
+    move_error = ""
+    if body.move_existing:
+        try:
+            move = relocate_organized_items(
+                library,
+                source,
+                {**target, "match_key": key},
+            )
+        except (SourceError, OSError, ValueError) as exc:
+            move_error = str(exc)
+    invalidate_library(library_id)
+    return {"target": target, "move": move, "move_error": move_error}
+
+
+@router.delete("/{library_id}/work-target")
+def restore_work_target(
+    library_id: int,
+    item_id: int | None = None,
+    match_key: str = "",
+):
+    library = query_one("SELECT * FROM libraries WHERE id=?", (library_id,))
+    if not library:
+        raise HTTPException(status_code=404, detail="影视库不存在")
+    _ensure_work_idle(library_id)
+    key = _resolve_work_key(library_id, item_id, match_key)
+    restored = delete_target(library_id, key)
+    invalidate_library(library_id)
+    return {"match_key": key, "restored": restored}
+
+
 @router.post("/{library_id}/plan")
 def preview_plan(library_id: int, body: PlanBody):
     library = query_one("SELECT * FROM libraries WHERE id=?", (library_id,))
@@ -690,11 +809,13 @@ def preview_plan(library_id: int, body: PlanBody):
         raise HTTPException(status_code=400, detail="请选择要整理的文件")
     source_row = query_one("SELECT * FROM sources WHERE id=?", (library["source_id"],))
     source = build_source(source_row)
+    targets = load_targets(library_id)
     organizer = Organizer(
         source,
         {**DEFAULT_NAMING, **(loads(library["naming"], {}) or {})},
         {**DEFAULT_SCRAPE, **(loads(library["scrape"], {}) or {})},
         manual_links=load_attachment_links(library_id),
+        targets=targets,
     )
     placeholders = ",".join("?" for _ in body.item_ids)
     rows = query_all(
@@ -725,7 +846,14 @@ def preview_plan(library_id: int, body: PlanBody):
         if not match.get("tmdb_id"):
             plan.append({"id": item["id"], "file_name": item["file_name"], "error": "未匹配"})
             continue
-        details = details_for(match) if auto_category and needs_details(match) else {}
+        key = item["match_key"] or work_key(match)
+        pinned = targets.get(key) if key else None
+        details = (
+            details_for(match)
+            if auto_category and not pinned and needs_details(match)
+            else {}
+        )
+        item_target = item.get("target_dir_override") or ""
         folder, target = organizer.target_for(
             parsed,
             match,
@@ -733,6 +861,7 @@ def preview_plan(library_id: int, body: PlanBody):
             target_root=library["target_root"] or "",
             details=details,
             target_name=item.get("target_name_override") or "",
+            target_dir=item_target,
         )
         _, auto_target = organizer.target_for(
             parsed,
@@ -755,6 +884,8 @@ def preview_plan(library_id: int, body: PlanBody):
                 "title": match.get("title"),
                 "season": parsed.get("season"),
                 "episode": parsed.get("episode"),
+                "organize_target": pinned,
+                "item_target": {"path": item_target} if item_target else None,
                 "attachments": [*attachments["items"], *attachments["folder_items"]],
                 "attachment_counts": attachments["counts"],
                 "attachment_total": attachments["total"],

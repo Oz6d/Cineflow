@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS items (
     status TEXT NOT NULL DEFAULT 'review',
     target_path TEXT,
     target_name_override TEXT,
+    target_dir_override TEXT,
     error TEXT,
     manual INTEGER NOT NULL DEFAULT 0,
     match_key TEXT,
@@ -83,6 +84,23 @@ CREATE TABLE IF NOT EXISTS items (
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_library_status ON items(library_id, status);
+
+-- 作品级整理位置：按影视库 + TMDb 作品记住用户手动选择的目录。
+-- path 相对 target_root；mode=category 表示分类目录（仍自动建作品文件夹），
+-- mode=show 表示作品文件夹（文件直接放进该目录）。
+CREATE TABLE IF NOT EXISTS organize_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    library_id INTEGER NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+    match_key TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'category',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(library_id, match_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_organize_targets_library
+    ON organize_targets(library_id);
 
 -- 手动把字幕 / 音轨 / 图片 / NFO 关联到某个视频。
 -- 以路径为键，既能覆盖待整理文件，也能覆盖已整理到目标目录的文件。
@@ -352,6 +370,7 @@ def init_db() -> None:
             "replaced_by": "INTEGER",
             "subscription_id": "INTEGER",
             "target_name_override": "TEXT",
+            "target_dir_override": "TEXT",
         }.items():
             if column not in cols:
                 conn.execute(f"ALTER TABLE items ADD COLUMN {column} {ddl}")

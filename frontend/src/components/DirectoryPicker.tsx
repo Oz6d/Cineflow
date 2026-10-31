@@ -24,16 +24,23 @@ export function DirectoryPicker({
   sourceId,
   title,
   initialPath = "",
+  rootPath = "",
   onClose,
   onSelect,
 }: {
   sourceId: number;
   title: string;
   initialPath?: string;
+  rootPath?: string;
   onClose: () => void;
   onSelect: (path: string) => void;
 }) {
-  const [path, setPath] = useState(initialPath);
+  const root = rootPath.replace(/^\/+|\/+$/g, "");
+  const startsInsideRoot = (value: string) =>
+    !root || value === root || value.startsWith(`${root}/`);
+  const [path, setPath] = useState(
+    initialPath && startsInsideRoot(initialPath) ? initialPath : root,
+  );
   const [listing, setListing] = useState<BrowseResult | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,8 +72,16 @@ export function DirectoryPicker({
     };
   }, [sourceId, path]);
 
-  const segments = path ? path.split("/").filter(Boolean) : [];
-  const parentPath = segments.length > 0 ? segments.slice(0, -1).join("/") : "";
+  const rootLabel = root ? root.split("/").filter(Boolean).pop() || "根目录" : "根目录";
+  const relative = path.startsWith(root)
+    ? path.slice(root.length).replace(/^\/+/, "")
+    : "";
+  const segments = relative ? relative.split("/").filter(Boolean) : [];
+  const parentPath =
+    segments.length > 0
+      ? [root, ...segments.slice(0, -1)].filter(Boolean).join("/")
+      : root;
+  const atRoot = !relative;
 
   const createFolder = async () => {
     const name = newName.trim().replace(/^\/+|\/+$/g, "");
@@ -114,7 +129,7 @@ export function DirectoryPicker({
           <Button
             className="shrink-0 px-2.5 py-2"
             title="上一级"
-            disabled={!path}
+            disabled={atRoot}
             onClick={() => setPath(parentPath)}
           >
             <ArrowUp size={14} />
@@ -123,12 +138,12 @@ export function DirectoryPicker({
             <button
               type="button"
               className="rounded px-1 py-0.5 text-slate-400 transition hover:bg-white/10 hover:text-mint-300"
-              onClick={() => setPath("")}
+              onClick={() => setPath(root)}
             >
-              根目录
+              {rootLabel}
             </button>
             {segments.map((segment, index) => {
-              const target = segments.slice(0, index + 1).join("/");
+              const target = [root, ...segments.slice(0, index + 1)].filter(Boolean).join("/");
               const isLast = index === segments.length - 1;
               return (
                 <span key={target} className="flex items-center">

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MouseEvent,
+  type SetStateAction,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -210,16 +218,6 @@ function collectFolders(node: FolderNode, out: Set<string> = new Set()): Set<str
   return out;
 }
 
-function defaultExpanded(node: FolderNode, maxDepth: number, out: Set<string> = new Set()): Set<string> {
-  for (const child of node.children) {
-    if (child.kind === "folder") {
-      if (child.depth <= maxDepth) out.add(child.path);
-      defaultExpanded(child, maxDepth, out);
-    }
-  }
-  return out;
-}
-
 type Row = { kind: "folder"; node: FolderNode } | { kind: "file"; node: FileNode };
 
 function rowKey(row: Row): string {
@@ -264,6 +262,8 @@ export function FileBrowser({
   library,
   items,
   selected,
+  expanded,
+  onExpandedChange,
   onSelect,
   onOpenItem,
   onPreview,
@@ -274,6 +274,8 @@ export function FileBrowser({
   library: Library;
   items: MediaItem[];
   selected: number[];
+  expanded: Set<string>;
+  onExpandedChange: Dispatch<SetStateAction<Set<string>>>;
   onSelect: (ids: number[]) => void;
   onOpenItem: (item: MediaItem) => void;
   onPreview: (ids: number[]) => void;
@@ -287,8 +289,6 @@ export function FileBrowser({
     const saved = typeof window !== "undefined" ? window.localStorage.getItem(NAME_MODE_KEY) : null;
     return saved === "wrap" || saved === "scroll" ? saved : "ellipsis";
   });
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const initialised = useRef(false);
   const anchorRef = useRef<string | null>(null);
 
   const [query, setQuery] = useState("");
@@ -310,12 +310,6 @@ export function FileBrowser({
 
   const tree = useMemo(() => buildTree(items, library.root_path, sortMode), [items, library.root_path, sortMode]);
   const allFiles = useMemo(() => walkFiles(tree), [tree]);
-
-  useEffect(() => {
-    if (initialised.current || !items.length) return;
-    initialised.current = true;
-    setExpanded(defaultExpanded(tree, 2));
-  }, [tree, items.length]);
 
   const rows = useMemo(() => flattenRows(tree, expanded), [tree, expanded]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
@@ -365,7 +359,7 @@ export function FileBrowser({
   }, [selectionKey]);
 
   const toggleFolder = (path: string) => {
-    setExpanded((current) => {
+    onExpandedChange((current) => {
       const next = new Set(current);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -678,10 +672,10 @@ export function FileBrowser({
             </div>
             <div className="mt-0.5 text-[10px] text-slate-600">点文件夹整组选中 · Shift 连选 · Ctrl / ⌘ 多选</div>
             <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-slate-500">
-              <button className="rounded px-1 py-0.5 transition hover:bg-white/[0.06] hover:text-slate-300" onClick={() => setExpanded(collectFolders(tree))}>
+              <button className="rounded px-1 py-0.5 transition hover:bg-white/[0.06] hover:text-slate-300" onClick={() => onExpandedChange(collectFolders(tree))}>
                 展开全部
               </button>
-              <button className="rounded px-1 py-0.5 transition hover:bg-white/[0.06] hover:text-slate-300" onClick={() => setExpanded(new Set())}>
+              <button className="rounded px-1 py-0.5 transition hover:bg-white/[0.06] hover:text-slate-300" onClick={() => onExpandedChange(new Set())}>
                 收起全部
               </button>
               <div className="ml-auto flex items-center gap-1">

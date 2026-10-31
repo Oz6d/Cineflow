@@ -131,7 +131,10 @@ export interface MediaItem {
   manual?: boolean;
   target_path?: string | null;
   target_name_override?: string;
+  target_dir_override?: string;
   planned_name?: string;
+  organize_target?: { path: string; mode: "category" | "show" } | null;
+  item_target?: { path: string } | null;
   updated_at?: string;
 }
 

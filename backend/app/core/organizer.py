@@ -17,7 +17,7 @@ from .attachments import (
 from .classify import SUB_MIN_SCORE, TOP_MIN_SCORE, attributes_for, best_folder, pick_other
 from .naming import DEFAULT_SCRAPE, build_target, normalize_collision, sanitize_component
 from .parser import file_ext
-from .providers import FileSource, SourceError, join, norm, parent_of
+from .providers import FileSource, SourceError, join, norm, parent_of, safe_relative
 from .scraper import (
     ImageFetcher,
     episode_nfo,
@@ -84,12 +84,18 @@ class Organizer:
         images: ImageFetcher | None = None,
         manual_links: dict[str, str] | None = None,
         source_root: str = "",
+        targets: dict[str, dict[str, Any]] | None = None,
     ):
         self.source = source
         self.naming = naming or {}
         self.scrape = {**DEFAULT_SCRAPE, **(scrape or {})}
         self.images = images or ImageFetcher()
         self.source_root = norm(source_root)
+        self.targets = {
+            str(key): dict(value)
+            for key, value in (targets or {}).items()
+            if key and isinstance(value, dict)
+        }
         self.manual_links = {
             norm(attachment): norm(video)
             for attachment, video in (manual_links or {}).items()
@@ -98,6 +104,25 @@ class Organizer:
         self._top_dir_cache: dict[str, list[str]] = {}
         self._sub_dir_cache: dict[str, list[str]] = {}
         self._written: set[str] = set()
+
+    def _pinned_target(self, match: dict[str, Any]) -> dict[str, Any] | None:
+        """作品级手动整理位置；只有用户明确设置过的作品才会命中。"""
+        match = match or {}
+        tmdb_id = match.get("tmdb_id")
+        if not tmdb_id or not self.targets:
+            return None
+        key = f"{match.get('media_type') or 'movie'}:{tmdb_id}"
+        pin = self.targets.get(key)
+        if not pin:
+            return None
+        mode = pin.get("mode") if pin.get("mode") in ("category", "show") else "category"
+        try:
+            path = safe_relative(str(pin.get("path") or ""))
+        except SourceError:
+            return None
+        if mode == "show" and not path:
+            return None
+        return {"path": path, "mode": mode}
 
     def _entries(self, directory: str) -> list[Any]:
         key = norm(directory)
@@ -167,7 +192,13 @@ class Organizer:
         details: dict[str, Any] | None = None,
     ) -> str:
         """按目标目录已有结构选择分类目录（如 电影/欧美电影）；识别不到时返回空串。"""
-        if not target_root or not self.naming.get("auto_category", True):
+        if not target_root:
+            return ""
+        pinned = self._pinned_target(match)
+        if pinned:
+            # 手动位置优先于自动分类；作品文件夹模式不再加分类前缀。
+            return pinned["path"] if pinned["mode"] == "category" else ""
+        if not self.naming.get("auto_category", True):
             return ""
         attr = attributes_for(match, details)
         tops = self._child_dir_names(target_root, self._top_dir_cache)
@@ -221,6 +252,7 @@ class Organizer:
         target_root: str = "",
         details: dict[str, Any] | None = None,
         target_name: str = "",
+        target_dir: str = "",
     ) -> tuple[str, str]:
         extension = file_ext(source_path) or ".mkv"
         source_name = source_path.replace("\\", "/").rsplit("/", 1)[-1]
@@ -234,6 +266,32 @@ class Organizer:
         )
         if target_name:
             filename = target_name
+        if target_dir:
+            # 单个文件手动指定位置：文件直接放进所选文件夹，不再套分类 / 季目录。
+            try:
+                relative = safe_relative(target_dir)
+            except SourceError:
+                relative = ""
+            if relative:
+                base = join(target_root, relative) if target_root else relative
+                return base, join(base, filename)
+        pinned = self._pinned_target(match)
+        if pinned and pinned["mode"] == "show":
+            base = join(target_root, pinned["path"]) if target_root else pinned["path"]
+            media_type = match.get("media_type") or parsed.get("media_type") or "movie"
+            season_number = parsed.get("season")
+            if media_type == "tv" and season_number is not None:
+                try:
+                    season_name = self._season_folder_name(int(season_number), match)
+                except (TypeError, ValueError):
+                    season_name = ""
+                season_parts = [
+                    sanitize_component(part)
+                    for part in str(season_name).split("/")
+                    if part.strip()
+                ]
+                base = join(base, *season_parts)
+            return base, join(base, filename)
         parts = [part for part in (self.category_prefix(match, target_root, details), folder) if part]
         folder_path = join(target_root, *parts) if target_root else join(*parts)
         return folder_path, join(folder_path, filename)
@@ -317,6 +375,9 @@ class Organizer:
         """剧集/电影的作品根目录（不含 Season 子目录），用于写作品级海报和剧集 NFO。"""
         from .naming import render, template_values
 
+        pinned = self._pinned_target(match)
+        if pinned and pinned["mode"] == "show":
+            return join(target_root, pinned["path"]) if target_root else pinned["path"]
         values = template_values({}, match, self.naming)
         media_type = match.get("media_type") or "movie"
         key = "tv_folder" if media_type == "tv" else "movie_folder"
@@ -376,6 +437,7 @@ class Organizer:
         overwrite: bool = False,
         details: dict[str, Any] | None = None,
         target_name: str = "",
+        target_dir: str = "",
         collision: str = "",
     ) -> OrganizeResult:
         warnings: list[str] = []
@@ -387,6 +449,7 @@ class Organizer:
             target_root=target_root,
             details=details,
             target_name=target_name,
+            target_dir=target_dir,
         )
         policy = normalize_collision(collision or self.naming.get("collision"))
         overwrite = bool(overwrite) or policy == "overwrite"

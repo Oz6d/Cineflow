@@ -8,6 +8,7 @@ import {
   Eye,
   Film,
   Files,
+  FolderCog,
   Layers3,
   Loader2,
   Paperclip,
@@ -33,6 +34,8 @@ import { FileBrowser } from "../components/FileBrowser";
 import { LibraryFiles } from "../components/LibraryFiles";
 import { RenameModal } from "../components/RenameModal";
 import { TargetNameModal, type TargetNameItem } from "../components/TargetNameModal";
+import { ItemTargetModal } from "../components/ItemTargetModal";
+import { WorkTargetModal } from "../components/WorkTargetModal";
 import {
   Badge,
   Button,
@@ -115,9 +118,23 @@ export default function LibraryDetailPage() {
 
   const [selected, setSelected] = useState<number[]>([]);
   const [filesView, setFilesView] = useState<"videos" | "all">("videos");
+  // 文件夹展开状态放在页面层，切换到海报墙再回来时保持不变；默认全部收起。
+  const [fileExpanded, setFileExpanded] = useState<Set<string>>(new Set());
   const [openItem, setOpenItem] = useState<MediaItem | null>(null);
   const [openWork, setOpenWork] = useState<Work | null>(null);
   const [targetEditItem, setTargetEditItem] = useState<TargetNameItem | null>(null);
+  const [workTarget, setWorkTarget] = useState<{
+    itemId?: number;
+    matchKey?: string;
+    title?: string;
+    currentPath?: string;
+  } | null>(null);
+  const [itemTarget, setItemTarget] = useState<MediaItem | null>(null);
+  const [workTargetInfo, setWorkTargetInfo] = useState<{
+    key: string;
+    target: { path: string; mode: "category" | "show" } | null;
+  } | null>(null);
+  const [itemRefresh, setItemRefresh] = useState(0);
   const [workSeason, setWorkSeason] = useState<number | "all">("all");
   const [planOpen, setPlanOpen] = useState(false);
   const [plan, setPlan] = useState<any[] | null>(null);
@@ -164,6 +181,10 @@ export default function LibraryDetailPage() {
     };
   }, []);
 
+  useEffect(() => {
+    setFileExpanded(new Set());
+  }, [libraryId]);
+
   const watchTask = (taskId: number) => {
     if (taskTimer.current) window.clearInterval(taskTimer.current);
     const tick = async () => {
@@ -209,6 +230,27 @@ export default function LibraryDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.get("item"), itemData, tab, filesView]);
 
+  useEffect(() => {
+    if (!openWork) {
+      setWorkTargetInfo(null);
+      return;
+    }
+    let mounted = true;
+    api
+      .get<{ target: { path: string; mode: "category" | "show" } | null }>(
+        `/api/libraries/${libraryId}/work-target?match_key=${encodeURIComponent(openWork.key)}`,
+      )
+      .then((data) => {
+        if (mounted) setWorkTargetInfo({ key: openWork.key, target: data.target });
+      })
+      .catch(() => {
+        if (mounted) setWorkTargetInfo({ key: openWork.key, target: null });
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [openWork?.key, libraryId, itemRefresh]);
+
   const items = tab === "files" && filesView === "all" ? [] : itemData?.items || [];
   const allSelected = items.length > 0 && selected.length === items.length;
   const reviewCount = library ? library.counts.review + library.counts.unmatched + library.counts.failed : 0;
@@ -241,6 +283,16 @@ export default function LibraryDetailPage() {
       setPlanOpen(false);
     } finally {
       setPlanLoading(false);
+    }
+  };
+
+  const handleWorkTargetSaved = () => {
+    setItemRefresh((value) => value + 1);
+    reloadItems();
+    reloadWorks();
+    reloadLibrary();
+    if (planOpen) {
+      void previewPlan((plan || []).filter((entry) => !entry.error).map((entry) => entry.id));
     }
   };
 
@@ -678,6 +730,8 @@ export default function LibraryDetailPage() {
               library={library}
               items={items}
               selected={selected}
+              expanded={fileExpanded}
+              onExpandedChange={setFileExpanded}
               onSelect={setSelected}
               onOpenItem={setOpenItem}
               onPreview={(ids) => previewPlan(ids)}
@@ -750,6 +804,33 @@ export default function LibraryDetailPage() {
               {(openWork.genres || []).map((genre) => (
                 <Badge key={genre}>{genre}</Badge>
               ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-[11px]">
+              <FolderCog size={14} className="shrink-0 text-mint-300/80" />
+              <span className="shrink-0 text-slate-500">存放位置</span>
+              <span className="min-w-0 flex-1 truncate text-slate-300">
+                {(() => {
+                  const target = workTargetInfo?.key === openWork.key ? workTargetInfo.target : null;
+                  if (!target) return "自动分类";
+                  return target.mode === "show"
+                    ? `作品文件夹：${target.path}`
+                    : `分类：${target.path || "整理后目录根目录"}`;
+                })()}
+              </span>
+              <button
+                type="button"
+                className="shrink-0 rounded px-2 py-0.5 text-[11px] text-mint-300/80 transition hover:bg-mint-400/10 hover:text-mint-200"
+                onClick={() =>
+                  setWorkTarget({
+                    matchKey: openWork.key,
+                    title: openWork.title,
+                    currentPath: openWork.items.find((item) => item.target_path)?.target_path || undefined,
+                  })
+                }
+              >
+                修改
+              </button>
             </div>
 
             <div className="flex gap-2">
@@ -925,15 +1006,38 @@ export default function LibraryDetailPage() {
         onSaved={handleTargetSaved}
       />
 
+      <WorkTargetModal
+        open={Boolean(workTarget)}
+        libraryId={libraryId}
+        sourceId={library?.source_id || 0}
+        itemId={workTarget?.itemId}
+        matchKey={workTarget?.matchKey}
+        title={workTarget?.title}
+        currentPath={workTarget?.currentPath}
+        onClose={() => setWorkTarget(null)}
+        onSaved={handleWorkTargetSaved}
+      />
+
+      <ItemTargetModal
+        open={Boolean(itemTarget)}
+        item={itemTarget}
+        sourceId={library?.source_id || 0}
+        targetRoot={library?.target_root || ""}
+        onClose={() => setItemTarget(null)}
+        onSaved={handleWorkTargetSaved}
+      />
+
       {/* 文件抽屉 */}
       <ItemDrawer
         item={openItem}
+        refreshToken={itemRefresh}
         onClose={() => {
           setOpenItem(null);
           setParams(tab === "works" ? {} : { tab });
         }}
         onUpdated={updateItem}
         onPreview={(itemId) => previewPlan([itemId])}
+        onEditItemLocation={(entry) => setItemTarget(entry)}
         onRename={(itemId) => {
           setOpenItem(null);
           openRename([itemId]);
@@ -993,6 +1097,11 @@ export default function LibraryDetailPage() {
                     <div className="flex gap-2">
                       <span className="h-fit shrink-0 select-none rounded bg-mint-400/10 px-1.5 py-px text-[10px] text-mint-300">目标</span>
                       <span className="min-w-0 break-all text-mint-200">{entry.target_path}</span>
+                      {entry.item_target ? (
+                        <span className="h-fit shrink-0 rounded bg-sky-400/10 px-1 py-px text-[9px] text-sky-300/80">单独指定</span>
+                      ) : entry.organize_target ? (
+                        <span className="h-fit shrink-0 rounded bg-mint-400/10 px-1 py-px text-[9px] text-mint-300/80">已固定位置</span>
+                      ) : null}
                       <button
                         type="button"
                         className="h-fit shrink-0 rounded p-0.5 text-slate-600 transition hover:bg-white/[0.08] hover:text-mint-300"
@@ -1009,6 +1118,22 @@ export default function LibraryDetailPage() {
                       >
                         <PencilLine size={11} />
                       </button>
+                      {entry.media_type ? (
+                        <button
+                          type="button"
+                          className="h-fit shrink-0 rounded p-0.5 text-slate-600 transition hover:bg-white/[0.08] hover:text-mint-300"
+                          title="调整这部作品的整理位置"
+                          onClick={() =>
+                            setWorkTarget({
+                              itemId: entry.id,
+                              title: entry.title,
+                              currentPath: entry.target_path,
+                            })
+                          }
+                        >
+                          <FolderCog size={11} />
+                        </button>
+                      ) : null}
                     </div>
                     {entry.attachment_total || entry.attachment_unmatched ? (
                       <div className="mt-2 rounded-lg border border-white/[0.05] bg-white/[0.02] px-2.5 py-2 font-sans">
@@ -1257,16 +1382,20 @@ function ItemsTable({
 
 function ItemDrawer({
   item,
+  refreshToken,
   onClose,
   onUpdated,
   onPreview,
   onRename,
+  onEditItemLocation,
 }: {
   item: MediaItem | null;
+  refreshToken?: number;
   onClose: () => void;
   onUpdated: (item: MediaItem) => void;
   onPreview: (id: number) => void;
   onRename: (id: number) => void;
+  onEditItemLocation: (item: MediaItem) => void;
 }) {
   const toast = useToast();
   const [detail, setDetail] = useState<MediaItem | null>(item);
@@ -1335,7 +1464,7 @@ function ItemDrawer({
     return () => {
       mounted = false;
     };
-  }, [item?.id]);
+  }, [item?.id, refreshToken]);
 
   if (!item || !detail) return null;
 
@@ -1495,6 +1624,31 @@ function ItemDrawer({
                 <div className="mt-1.5 flex gap-2">
                   <span className="h-fit shrink-0 select-none rounded bg-mint-400/10 px-1.5 py-px text-[10px] text-mint-300">目标</span>
                   <span className="min-w-0 break-all font-mono text-mint-300/90">{detail.target_path}</span>
+                </div>
+              ) : null}
+              {detail.match ? (
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="h-fit shrink-0 select-none rounded bg-white/[0.06] px-1.5 py-px text-[10px] text-slate-500">位置</span>
+                  <span className="min-w-0 flex-1 break-all font-mono text-slate-400">
+                    {detail.target_dir_override
+                      ? `单独指定：${detail.target_dir_override}`
+                      : detail.organize_target
+                        ? detail.organize_target.mode === "show"
+                          ? `跟随作品（作品文件夹：${detail.organize_target.path}）`
+                          : `跟随作品（分类：${detail.organize_target.path || "整理后目录根目录"}）`
+                        : "跟随作品（自动分类）"}
+                  </span>
+                  {detail.target_dir_override ? (
+                    <span className="shrink-0 text-[10px] text-mint-300/70">只影响这个文件</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-slate-500 transition hover:bg-white/[0.08] hover:text-mint-300"
+                    title="调整这个文件的存放位置"
+                    onClick={() => onEditItemLocation(detail)}
+                  >
+                    调整
+                  </button>
                 </div>
               ) : null}
             </div>

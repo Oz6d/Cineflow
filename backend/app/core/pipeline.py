@@ -19,6 +19,7 @@ from .metadata.tmdb import TMDBError, client_from_settings
 from .naming import DEFAULT_NAMING, DEFAULT_SCRAPE
 from .openlist import OpenListError, refresh_directory
 from .organizer import Organizer
+from .organize_targets import load_targets
 from .parser import VIDEO_EXTS, file_ext, parse_media_name
 from .providers import SourceError, SourceNotFound, build_source, parent_of
 from .scraper import ImageFetcher
@@ -660,6 +661,7 @@ def organize_items(
         images=images,
         manual_links=load_attachment_links(library["id"]),
         source_root=library["root_path"] or "",
+        targets=load_targets(library["id"]),
     )
     target_root = library["target_root"] or ""
     scraped_folders: set[str] = set()
@@ -772,6 +774,7 @@ def organize_items(
                 episode=episode,
                 details=details,
                 target_name=item.get("target_name_override") or "",
+                target_dir=item.get("target_dir_override") or "",
                 collision=collision,
             )
             if result.skipped:

@@ -1922,7 +1922,7 @@ export default function SubscriptionsPage() {
                 checked={form.auto_organize}
                 onChange={(value) => patch({ auto_organize: value })}
                 label="自动整理匹配成功的文件"
-                hint="开启后会直接重命名、刮削并移动到目标目录。"
+                hint="开启后会直接重命名、刮削并移动到目标目录；如果这部作品在影视库里调整过整理位置，新集会放到调整后的位置。"
               />
               <Switch
                 checked={form.replace_versions}
